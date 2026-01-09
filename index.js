@@ -24,11 +24,14 @@ app.post('/generate', async (req, res) => {
   const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 
   try {
+    // Fetch the record
     const record = await base('Generation').find(recordId);
     const fields = record.fields;
 
+    // If Generate is not checked, do nothing
     if (!fields.Generate) return res.send('Generate not checked');
 
+    // Immediately update status to "Generating" so user sees it right away
     await base('Generation').update(recordId, { Status: 'Generating' });
 
     // 1. Download TikTok video with Apify
