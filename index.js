@@ -4,6 +4,7 @@ const Airtable = require('airtable');
 const app = express();
 app.use(express.json());
 
+// Global error logging
 process.on('unhandledRejection', (reason) => console.error('Unhandled Rejection:', reason));
 process.on('uncaughtException', (error) => console.error('Uncaught Exception:', error));
 
@@ -30,7 +31,7 @@ app.post('/generate', async (req, res) => {
 
     await base('Generation').update(recordId, { Status: 'Generating' });
 
-    // Download video
+    // 1. Download TikTok video with Apify
     let sourceVideoUrl = null;
     let coverImageUrl = null;
 
@@ -45,12 +46,12 @@ app.post('/generate', async (req, res) => {
         }
       );
 
-      if (!apifyResponse.ok) throw new Error('Apify failed');
+      if (!apifyResponse.ok) throw new Error('Apify failed: ' + apifyResponse.statusText);
 
       const data = await apifyResponse.json();
       if (data.length > 0) {
-        sourceVideoUrl = data[0].playAddr || data[0].downloadAddr;
-        coverImageUrl = data[0].cover;
+        sourceVideoUrl = data[0].playAddr || data[0].videoMeta?.playAddr || data[0].downloadAddr;
+        coverImageUrl = data[0].cover || data[0].videoMeta?.cover;
         if (sourceVideoUrl && !sourceVideoUrl.endsWith('.mp4')) sourceVideoUrl += '.mp4';
       }
     }
@@ -62,11 +63,11 @@ app.post('/generate', async (req, res) => {
       'Cover Image': coverImageUrl ? [{ url: coverImageUrl }] : []
     });
 
-    // Face image
+    // 2. Face from AI Character
     const faceImage = fields['AI Character']?.[0]?.url;
     if (!faceImage) throw new Error('No AI Character image');
 
-    // Seedream on Wavespeed
+    // 3. Seedream v4.5 on Wavespeed (face enhancement)
     const seedreamResponse = await fetch(
       'https://api.wavespeed.ai/api/v3/bytedance/seedream-v4.5/edit',
       {
@@ -95,7 +96,7 @@ app.post('/generate', async (req, res) => {
       'Generated Images': [{ url: generatedFaceUrl }]
     });
 
-    // Kling 2.6 Motion Control on Wavespeed
+    // 4. Kling 2.6 Motion Control on Wavespeed (video animation)
     const klingResponse = await fetch(
       'https://api.wavespeed.ai/api/v3/kwaivgi/kling-v2.6-std/motion-control',
       {
@@ -122,6 +123,7 @@ app.post('/generate', async (req, res) => {
 
     if (!finalVideoUrl) throw new Error('No final video');
 
+    // 5. Save final result
     await base('Generation').update(recordId, {
       'Output Video': [{ url: finalVideoUrl }],
       Status: 'Complete',
