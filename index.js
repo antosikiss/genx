@@ -67,7 +67,7 @@ app.post('/generate', async (req, res) => {
     const faceImage = fields['AI Character']?.[0]?.url;
     if (!faceImage) throw new Error('No AI Character image');
 
-    // 3. Seedream v4.5 on Wavespeed (face enhancement)
+    // 3. Seedream v4.5 on Wavespeed
     const seedreamResponse = await fetch(
       'https://api.wavespeed.ai/api/v3/bytedance/seedream-v4.5/edit',
       {
@@ -96,7 +96,7 @@ app.post('/generate', async (req, res) => {
       'Generated Images': [{ url: generatedFaceUrl }]
     });
 
-    // 4. Kling 2.6 Motion Control on Wavespeed (video animation)
+    // 4. Kling 2.6 Motion Control on Wavespeed
     const klingResponse = await fetch(
       'https://api.wavespeed.ai/api/v3/kwaivgi/kling-v2.6-std/motion-control',
       {
