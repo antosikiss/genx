@@ -46,7 +46,7 @@ app.post('/generate', async (req, res) => {
         }
       );
 
-      if (!apifyResponse.ok) throw new Error('Apify failed: ' + apifyResponse.statusText);
+      if (!apifyResponse.ok) throw new Error('Apify failed');
 
       const data = await apifyResponse.json();
       if (data.length > 0) {
