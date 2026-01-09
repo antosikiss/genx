@@ -141,7 +141,7 @@ app.post('/generate', async (req, res) => {
     } catch {}
     res.status(500).send(error.message);
   }
-}
+});
 
 async function pollWavespeedResult(id, maxAttempts = 60, interval = 5000) {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
