@@ -1,13 +1,19 @@
 {
   "name": "genx",
   "version": "1.0.0",
+  "description": "TikTok Replicator backend",
   "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "express": "^4.18.2",
     "node-fetch": "^2.7.0",
     "airtable": "^0.11.6"
   },
-  "scripts": {
-    "start": "node index.js"
-  }
+  "engines": {
+    "node": ">=18"
+  },
+  "author": "",
+  "license": "ISC"
 }
