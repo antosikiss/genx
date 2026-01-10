@@ -12,155 +12,168 @@ process.on('uncaughtException', (error) => {
   console.error('Uncaught Exception:', error.stack || error);
 });
 
-app.get('/generate', async (req, res) => {
-  console.log('GET /generate received with query:', JSON.stringify(req.query));
-  try {
-    const recordId = req.query.recordId;
-    await handleGenerate(recordId, res);
-  } catch (error) {
-    console.error('Error in GET /generate:', error.stack || error);
-    res.status(500).send('Server error');
+// Polling for Wavespeed async jobs
+async function pollWavespeedResult(requestId, maxAttempts = 60, interval = 5000) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, interval));
+    const pollUrl = `https://api.wavespeed.ai/api/v3/predictions/${requestId}/result`;
+    console.log(`Polling attempt ${attempt + 1}: ${pollUrl}`);
+    const pollRes = await fetch(pollUrl, {
+      headers: { 'Authorization': `Bearer ${process.env.WAVESPEED_API_KEY}` }
+    });
+    if (!pollRes.ok) {
+      console.log('Poll failed:', pollRes.status, pollRes.statusText);
+      continue;
+    }
+    const pollJson = await pollRes.json();
+    console.log('Poll response:', JSON.stringify(pollJson));
+    if (pollJson.status === 'completed' || pollJson.output) {
+      return pollJson;
+    }
+    if (pollJson.status === 'failed') {
+      throw new Error('Job failed: ' + (pollJson.error || 'Unknown'));
+    }
   }
-});
+  throw new Error('Wavespeed timeout after ' + maxAttempts + ' attempts');
+}
 
 app.post('/generate', async (req, res) => {
-  console.log('POST /generate received with body:', JSON.stringify(req.body));
-  try {
-    const { recordId } = req.body;
-    await handleGenerate(recordId, res);
-  } catch (error) {
-    console.error('Error in POST /generate:', error.stack || error);
-    res.status(500).send('Server error');
-  }
-});
-
-async function handleGenerate(recordId, res) {
-  console.log('handleGenerate called with recordId:', recordId);
+  const { recordId } = req.body;
   if (!recordId) return res.status(400).send('Missing recordId');
 
   const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
-  const AIRTABLE_BASE_ID = 'app5JstpSmtghcbMA';
+  const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
   const WAVESPEED_API_KEY = process.env.WAVESPEED_API_KEY;
-  const APIFY_API_KEY = process.env.APIFY_API_KEY;
-  const MAIN_TABLE_NAME = 'Generation';
+  const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
+  const RAPIDAPI_HOST = process.env.RAPIDAPI_HOST || 'tiktok-video-downloader-api.p.rapidapi.com';
 
-  if (!AIRTABLE_API_KEY || !WAVESPEED_API_KEY || !APIFY_API_KEY) return res.status(500).send('Missing required env vars');
+  if (!AIRTABLE_API_KEY || !AIRTABLE_BASE_ID || !WAVESPEED_API_KEY || !RAPIDAPI_KEY) {
+    return res.status(500).send('Missing environment variables');
+  }
 
   const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 
   try {
     console.log('Fetching record:', recordId);
-    const record = await base(MAIN_TABLE_NAME).find(recordId);
+    const record = await base('Generation').find(recordId);
     const fields = record.fields;
 
-    if (!fields.Generate) return res.status(200).send('Generate not triggered');
+    if (!fields.Generate) return res.send('Generate not checked');
 
-    await base(MAIN_TABLE_NAME).update(recordId, { Status: 'Generating' });
+    await base('Generation').update(recordId, { Status: 'Generating' });
 
+    // 1. Download video from RapidAPI (direct .mp4)
     let sourceVideoUrl = fields['Source Video'] ? fields['Source Video'][0].url : null;
     let coverImageUrl = fields['Cover Image'] ? fields['Cover Image'][0].url : null;
-    const tiktokLink = fields.Link;
-    const aiCharacterUrl = fields['AI Character'] ? fields['AI Character'][0].url : null;
 
-    if ((!sourceVideoUrl || !coverImageUrl) && tiktokLink && tiktokLink.includes('tiktok.com') && APIFY_API_KEY) {
-      console.log('Downloading video and thumbnail from Apify actor S5h7zRLfKFEr8pdj7');
-      const apifyData = {
-        urls: [tiktokLink]
-      };
-      const apifyUrl = `https://api.apify.com/v2/acts/S5h7zRLfKFEr8pdj7/run-sync-get-dataset-items?token=${APIFY_API_KEY}`;
-      const apifyRes = await fetch(apifyUrl, {
+    if ((!sourceVideoUrl || !coverImageUrl) && fields.Link && fields.Link.includes('tiktok.com')) {
+      console.log('Downloading from RapidAPI TikTok Downloader');
+      const response = await fetch(`https://${RAPIDAPI_HOST}/download`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(apifyData)
+        headers: {
+          'Content-Type': 'application/json',
+          'X-RapidAPI-Key': RAPIDAPI_KEY,
+          'X-RapidAPI-Host': RAPIDAPI_HOST
+        },
+        body: JSON.stringify({ url: fields.Link })
       });
-      if (!apifyRes.ok) {
-        const errText = await apifyRes.text();
-        throw new Error(`Apify error: ${apifyRes.statusText} - ${errText}`);
-      }
-      const apifyJson = await apifyRes.json();
-      console.log('Apify response (S5h7zRLfKFEr8pdj7):', JSON.stringify(apifyJson));
-      if (apifyJson.length === 0) throw new Error('Empty Apify response');
-      const post = apifyJson[0];
-      sourceVideoUrl = post.playAddr || post.videoMeta?.playAddr || post.downloadAddr || post.noWatermarkUrl || post.videoDownloadUrl || post.webVideoUrl || post.videoUrl;
-      coverImageUrl = post.cover || post.videoMeta?.cover || post.originCover || post.dynamicCover || post.thumbnail;
-      if (!sourceVideoUrl) throw new Error('No video URL found in Apify response');
+
+      if (!response.ok) throw new Error(`RapidAPI failed: ${response.statusText}`);
+
+      const data = await response.json();
+      console.log('RapidAPI response:', JSON.stringify(data));
+
+      sourceVideoUrl = data.data?.no_watermark_url || data.data?.download_url || data.data?.video_url || data.url;
+      coverImageUrl = data.data?.thumbnail || data.data?.cover;
+
+      if (!sourceVideoUrl) throw new Error('No video URL from RapidAPI');
       if (!sourceVideoUrl.endsWith('.mp4')) sourceVideoUrl += '.mp4';
-      console.log('Final Source Video URL (forced):', sourceVideoUrl);
+      console.log('Direct .mp4 URL from RapidAPI:', sourceVideoUrl);
     }
 
     if (!sourceVideoUrl) throw new Error('Missing Source Video');
 
-    await base(MAIN_TABLE_NAME).update(recordId, {
+    await base('Generation').update(recordId, {
       'Source Video': [{ url: sourceVideoUrl }],
       'Cover Image': coverImageUrl ? [{ url: coverImageUrl }] : []
     });
 
-    const faceImageUrl = aiCharacterUrl || coverImageUrl;
-    if (!faceImageUrl) throw new Error('Missing AI Character or Cover Image for face swap');
+    const faceImageUrl = fields['AI Character']?.[0]?.url || coverImageUrl;
+    if (!faceImageUrl) throw new Error('Missing AI Character or Cover Image');
 
     console.log('Generating images with Seedream v4.5 on Wavespeed');
-    const seedreamUuid = 'bytedance/seedream-v4.5/edit';
-    const seedreamUrl = `https://api.wavespeed.ai/api/v3/${seedreamUuid}`;
-    const seedreamData = {
-      images: [faceImageUrl],
-      prompt: 'high quality portrait, detailed face, realistic skin, sharp eyes',
-      width: 1728,
-      height: 2304,
-      wait: true
-    };
-    const seedreamRes = await fetch(seedreamUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${WAVESPEED_API_KEY}`
-      },
-      body: JSON.stringify(seedreamData)
+    const seedreamResponse = await fetch(
+      'https://api.wavespeed.ai/api/v3/bytedance/seedream-v4.5/edit',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${WAVESPEED_API_KEY}`
+        },
+        body: JSON.stringify({
+          images: [faceImageUrl],
+          prompt: 'high quality portrait, detailed face, realistic skin, sharp eyes',
+          width: 1728,
+          height: 2304
+        })
+      }
+    );
+
+    if (!seedreamResponse.ok) throw new Error('Seedream failed');
+
+    const seedreamJson = await seedreamResponse.json();
+    const seedreamId = seedreamJson.id;
+    const seedreamResult = await pollWavespeedResult(seedreamId);
+    const generatedFaceUrl = seedreamResult.output?.[0];
+
+    if (!generatedFaceUrl) throw new Error('No face generated');
+
+    await base('Generation').update(recordId, {
+      'Generated Images': [{ url: generatedFaceUrl }]
     });
-    if (!seedreamRes.ok) throw new Error(`Seedream error: ${seedreamRes.statusText}`);
-    const seedreamJson = await seedreamRes.json();
-    const generatedImages = (seedreamJson.output || []).map(url => ({ url }));
-    if (generatedImages.length === 0) throw new Error('No generated images from Seedream');
 
-    await base(MAIN_TABLE_NAME).update(recordId, { 'Generated Images': generatedImages });
+    console.log('Running Kling 2.6 Motion Control');
+    const klingResponse = await fetch(
+      'https://api.wavespeed.ai/api/v3/kwaivgi/kling-v2.6-std/motion-control',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${WAVESPEED_API_KEY}`
+        },
+        body: JSON.stringify({
+          character_image: generatedFaceUrl,
+          motion_video: sourceVideoUrl,
+          resolution: '720p'
+        })
+      }
+    );
 
-    console.log('Performing animation with Kling 2.6 Motion Control on Wavespeed');
-    const klingUuid = 'kwaivgi/kling-v2.6-std/motion-control';
-    const klingUrl = `https://api.wavespeed.ai/api/v3/${klingUuid}`;
-    const klingData = {
-      character_image: generatedImages[0].url,
-      motion_video: sourceVideoUrl,
-      resolution: '720p'
-    };
-    const klingRes = await fetch(klingUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${WAVESPEED_API_KEY}`
-      },
-      body: JSON.stringify(klingData)
-    });
-    if (!klingRes.ok) throw new Error(`Kling error: ${klingRes.statusText}`);
-    const klingJson = await klingRes.json();
-    const outputVideoUrl = klingJson.output_video_url;
+    if (!klingResponse.ok) throw new Error('Kling failed');
 
-    await base(MAIN_TABLE_NAME).update(recordId, {
-      'Output Video': [{ url: outputVideoUrl }],
+    const klingJson = await klingResponse.json();
+    const klingId = klingJson.id;
+    const finalResult = await pollWavespeedResult(klingId);
+    const finalVideoUrl = finalResult.output_video_url;
+
+    if (!finalVideoUrl) throw new Error('No final video');
+
+    await base('Generation').update(recordId, {
+      'Output Video': [{ url: finalVideoUrl }],
       Status: 'Complete',
       Generate: false
     });
-    res.status(200).send('Generation complete');
 
+    res.send('Success');
   } catch (error) {
-    console.error('Error during generation:', error.message, error.stack);
+    console.error('Error:', error.message);
     try {
-      await base(MAIN_TABLE_NAME).update(recordId, {
+      await base('Generation').update(recordId, {
         Status: 'Failed',
-        Generate: false
+        'Error Message': error.message
       });
-    } catch (updateError) {
-      console.error('Update failed:', updateError.message, updateError.stack);
-    }
-    res.status(500).send(error.message || 'Unknown error');
+    } catch {}
+    res.status(500).send(error.message);
   }
 }
 
